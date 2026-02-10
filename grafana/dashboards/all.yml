@@ -1,0 +1,13 @@
+# see here: https://grafana.com/docs/grafana/latest/administration/provisioning/#dashboards
+
+apiVersion: 1
+
+providers:
+- name: 'default'
+  orgId: 1
+  folder: ''
+  type: 'file'
+  updateIntervalSeconds: 10
+  allowUiUpdates: true
+  options:
+    path: '/etc/grafana/provisioning'  # this is the path inside the grafana docker container

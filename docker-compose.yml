@@ -1,0 +1,174 @@
+services:
+
+  broker:
+    image: confluentinc/cp-kafka:7.9.0
+    container_name: '${COMPOSE_PROJECT_NAME:-ol}-broker'
+    ports:
+      - '${PORT_BROKER:-29092}:29092'
+    volumes:
+      - broker-data:/var/lib/kafka/data
+    environment:
+      CLUSTER_ID: '${CLUSTER_ID:-YzUyZWRlYzBhNDkwNDNmNG}'
+      KAFKA_NODE_ID: '1'
+      KAFKA_PROCESS_ROLES: 'broker,controller'
+      KAFKA_CONTROLLER_QUORUM_VOTERS: '1@broker:9093'
+      KAFKA_CONTROLLER_LISTENER_NAMES: 'CONTROLLER'
+      KAFKA_LISTENERS: 'INTERNAL://broker:9092,EXTERNAL://broker:29092,CONTROLLER://broker:9093'
+      KAFKA_ADVERTISED_LISTENERS: 'INTERNAL://broker:9092,EXTERNAL://localhost:${PORT_BROKER:-29092}'
+      KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: 'INTERNAL:PLAINTEXT,EXTERNAL:PLAINTEXT,CONTROLLER:PLAINTEXT'
+      KAFKA_INTER_BROKER_LISTENER_NAME: 'INTERNAL'
+      KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: '1' # this and next 3 options set to 1 as we have only one broker
+      KAFKA_TRANSACTION_STATE_LOG_REPLICATION_FACTOR: '1'
+      KAFKA_TRANSACTION_STATE_LOG_MIN_ISR: '1'
+      KAFKA_CONFLUENT_BALANCER_TOPIC_REPLICATION_FACTOR: '1'
+      KAFKA_LOG_RETENTION_CHECK_INTERVAL_MS: '60000'  # check whether to delete log segments ever minute (default 5 minutes)
+      KAFKA_LOG4J_ROOT_LOGLEVEL: 'WARN'
+      KAFKA_LOG4J_LOGGERS: "\
+        kafka=WARN,\
+        kafka.controller=WARN,\
+        kafka.log.LogCleaner=WARN,\
+        state.change.logger=WARN,\
+        kafka.producer.async.DefaultEventHandler=WARN"
+
+  kafka-ui:
+    image: provectuslabs/kafka-ui:v0.7.2
+    container_name: '${COMPOSE_PROJECT_NAME:-ol}-kafka-ui'
+    ports:
+      - '${PORT_KAFKA_UI:-28080}:8080'
+    depends_on:
+      - broker
+      # - 
+    environment:
+      KAFKA_CLUSTERS_0_NAME: 'openlibrary'
+      KAFKA_CLUSTERS_0_BOOTSTRAPSERVERS: 'broker:9092'
+      KAFKA_CLUSTERS_0_KAFKACONNECT_0_NAME: connect
+      KAFKA_CLUSTERS_0_KAFKACONNECT_0_ADDRESS: http://connect:8083
+      LOGGING_LEVEL_ROOT: 'ERROR'
+      LOGGING_LEVEL_COM_PROVECTUS: 'ERROR'
+
+  postgres:
+    image: postgres:16.2-alpine3.19
+    container_name: '${COMPOSE_PROJECT_NAME:-ol}-postgres'
+    ports:
+      - '${PORT_POSTGRES:-25432}:5432'
+    volumes:
+      - ./postgres:/docker-entrypoint-initdb.d
+      - postgres-data:/var/lib/postgresql/data
+    environment:
+      POSTGRES_DB: 'db'
+      POSTGRES_USER: '${USERID:-user}'
+      POSTGRES_PASSWORD: '${USERPWD:-user}'
+
+  pgadmin:
+    image: dpage/pgadmin4:9.3
+    container_name: '${COMPOSE_PROJECT_NAME:-ol}-pgadmin'
+    depends_on:
+      - postgres
+    ports:
+      - '${PORT_PGADMIN:-20080}:80'
+    volumes:
+      - ./pgadmin4/servers.json:/pgadmin4/servers.json
+      - pgadmin-data:/var/lib/pgadmin
+    environment:
+      PGADMIN_DEFAULT_EMAIL: ${USEREMAIL:-user@example.com}
+      PGADMIN_DEFAULT_PASSWORD: ${USERPWD:-user}
+      PGADMIN_CONFIG_SERVER_MODE: 'False'
+      PGADMIN_DISABLE_POSTFIX: 'true'
+      GUNICORN_ACCESS_LOGFILE: '/dev/null'
+
+  grafana:
+    image: grafana/grafana-oss:11.6.1
+    container_name: '${COMPOSE_PROJECT_NAME:-ol}-grafana'
+    ports:
+      - '${PORT_GRAFANA:-23000}:3000'
+    depends_on:
+      - postgres
+    volumes:
+      - grafana-data:/var/lib/grafana
+      - ./grafana:/etc/grafana/provisioning:Z
+    environment:
+      GF_SECURITY_ADMIN_USER: '${USERID:-user}'
+      GF_SECURITY_ADMIN_PASSWORD: '${USERID:-user}'
+      GF_DASHBOARDS_DEFAULT_HOME_DASHBOARD_PATH: '/etc/grafana/provisioning/dashboards/main.json'
+      GF_USERS_DEFAULT_THEME: 'light'
+      GF_LOG_LEVEL: 'WARN'
+      DB_ADDR: 'postgres:5432'
+      DB_NAME: 'db'
+      DB_USERID: '${USERID:-user}'
+      DB_USERPWD: '${USERPWD:-user}'
+
+  producer:
+    build: producer
+    image: '${COMPOSE_PROJECT_NAME:-ol}-producer:latest'
+    container_name: '${COMPOSE_PROJECT_NAME:-ol}-producer'
+    depends_on:
+      - broker
+    command: [ 'python3', 'producer.py', '--bootstrap-servers', 'broker:9092', '--url', '${PRODUCER_URL}' ]
+
+  #
+  # Spark containers
+  #
+  # They are included only if 'processor-java' or 'processor-python' are part of COMPOSE_PROFILES,
+  # so to respectively run the Java or Python solutions (or your code, dependening on configuration)
+  # of this lab as part of Docker. These two containers create a simple Spark cluster with one
+  # master and one worker.
+  #
+
+  spark-master:
+    image: bitnamilegacy/spark:3.5.1
+    container_name: '${COMPOSE_PROJECT_NAME:-ol}-spark-master'
+    ports:
+      - '${PORT_SPARK_MASTER_UI:-8080}:8080'
+      - '${PORT_SPARK_MASTER:-7077}:7077'
+    profiles:
+      - processor-python
+    environment:
+      SPARK_MODE: 'master'
+
+  spark-worker:
+    image: bitnamilegacy/spark:3.5.1
+    container_name: '${COMPOSE_PROJECT_NAME:-ol}-spark-worker'
+    depends_on:
+      - spark-master
+    ports:
+      - '${PORT_SPARK_WORKER_UI:-8081}:8081'
+    profiles:
+      - processor-python
+    environment:
+      SPARK_MODE: 'worker'
+      SPARK_MASTER_URL: 'spark://spark-master:7077'
+
+  #
+  # Processor containers
+  #
+  # One of the following two containers may be activated by including 'processor-java' or 'processor-python'
+  # in COMPOSE_PROFILES. It's better if only one container is run (running both will compute output twice).
+  # Each container consists of a Spark image + the Java or Python code of the processor (see their Dockerfiles)
+  # Each container runs 'spark-submit ...' to submit the processor job to the spark-master & spark-worker
+  # cluster created above.
+  #
+
+  processor-python:
+    build: processor-python
+    image: '${COMPOSE_PROJECT_NAME:-ol}-processor-python:latest'
+    container_name: '${COMPOSE_PROJECT_NAME:-ol}-processor-python'
+    depends_on:
+      - spark-master
+      - broker
+    ports:
+      - '${PORT_PROCESSOR_SPARK_UI:-4040}:4040'
+    profiles:
+      - processor-python
+    environment:
+      PROCESSOR_MASTER: 'spark://spark-master:7077'
+      PROCESSOR_IMPLEMENTATION: '${PROCESSOR_PYTHON_FILE:-processor.py}'
+      PROCESSOR_ARGS: '--bootstrap-servers broker:9092'
+    volumes:
+      - ivy-cache:/tmp/.ivy2
+
+volumes:
+  broker-data:
+  postgres-data:
+  pgadmin-data:
+  grafana-data:
+  ivy-cache:
